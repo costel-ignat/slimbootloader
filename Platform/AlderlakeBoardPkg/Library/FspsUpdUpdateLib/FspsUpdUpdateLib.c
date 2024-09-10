@@ -38,6 +38,7 @@
 #include <IndustryStandard/UefiTcgPlatform.h>
 #include <Library/TpmLib.h>
 #include <Library/FusaConfigLib.h>
+#include <GpioPinsVer2Lp.h>
 
 #define CPU_PCIE_DT_HALO_MAX_ROOT_PORT     3
 #define CPU_PCIE_ULT_ULX_MAX_ROOT_PORT     3
@@ -339,30 +340,6 @@ TccModePostMemConfig (
   UINT8                                      MaxPchPcieRootPorts;
   UINT8                                      MaxCpuPciePorts;
 
-#if FixedPcdGet8(PcdAdlNSupport) == 0
-  UINT32                                    *TccCacheConfigBase;
-  UINT32                                     TccCacheConfigSize;
-  UINT32                                    *TccCrlBase;
-  UINT32                                     TccCrlSize;
-  UINT32                                    *TccStreamBase;
-  UINT32                                     TccStreamSize;
-  BIOS_SETTINGS                             *PolicyConfig;
-  TCC_STREAM_CONFIGURATION                  *StreamConfig;
-  TCC_CFG_DATA                              *TccCfgData;
-  EFI_STATUS                                 Status;
-  PLATFORM_DATA                             *PlatformData;
-  EFI_PLATFORM_FIRMWARE_BLOB                 TccStreamCfgBlob;
-  EFI_PLATFORM_FIRMWARE_BLOB                 TccCacheCfgBlob;
-  EFI_PLATFORM_FIRMWARE_BLOB                 TccCrlBlob;
-
-  Status = EFI_SUCCESS;
-
-  TccCfgData = (TCC_CFG_DATA *) FindConfigDataByTag(CDATA_TCC_TAG);
-  if ((TccCfgData == NULL) || (TccCfgData->TccEnable == 0)) {
-    return EFI_NOT_FOUND;
-  }
-#endif
-
   DEBUG ((DEBUG_INFO, "Tcc is enabled, setting Tcc Silicon Config\n"));
 
   // TCC related Silicon settings
@@ -396,130 +373,7 @@ TccModePostMemConfig (
   FspsUpd->FspsConfig.IfuEnable = 0;
   FspsUpd->FspsConfig.TccMode = 1;
 
-#if FixedPcdGet8(PcdAdlNSupport) == 0
-  FspsUpd->FspsConfig.SoftwareSramEn  = TccCfgData->TccSoftSram;
-  FspsUpd->FspsConfig.DsoTuningEn     = TccCfgData->TccTuning;
-  FspsUpd->FspsConfig.TccErrorLogEn   = TccCfgData->TccErrorLog;
-
-  if (!IsWdtFlagsSet(WDT_FLAG_TCC_DSO_IN_PROGRESS)) {
-    //
-    // If FSPM doesn't enable TCC DSO timer, FSPS should also skip TCC DSO.
-    //
-    DEBUG ((DEBUG_INFO, "DSO Tuning skipped.\n"));
-    FspsUpd->FspsConfig.TccStreamCfgStatus = 1;
-  } else if (TccCfgData->TccTuning != 0) {
-    // Reload Watch dog timer
-    WdtReloadAndStart (WDT_TIMEOUT_TCC_DSO, WDT_FLAG_TCC_DSO_IN_PROGRESS);
-
-    // Load TCC stream config from container
-    TccStreamBase = NULL;
-    TccStreamSize = 0;
-    Status = LoadComponent (SIGNATURE_32 ('I', 'P', 'F', 'W'), SIGNATURE_32 ('T', 'C', 'C', 'T'),
-                            (VOID **)&TccStreamBase, &TccStreamSize);
-    if (EFI_ERROR (Status)) {
-      DEBUG ((DEBUG_ERROR, "TCC Stream not found! %r\n", Status));
-    } else {
-      if ((TccStreamSize >= sizeof (TCC_STREAM_CONFIGURATION)) && (TccStreamBase != NULL)) {
-        FspsUpd->FspsConfig.TccStreamCfgBase = (UINT32)(UINTN)TccStreamBase;
-        FspsUpd->FspsConfig.TccStreamCfgSize = TccStreamSize;
-
-        DEBUG ((DEBUG_INFO, "Load Tcc Stream @0x%p, size = 0x%x\n", TccStreamBase, TccStreamSize));
-        DEBUG ((DEBUG_INFO, "Dump Tcc Stream with MIN(0x40, TccStreamSize):\n"));
-        DumpHex (2, 0, MIN(0x40, TccStreamSize), TccStreamBase);
-
-        if (MEASURED_BOOT_ENABLED() && (GetBootMode() != BOOT_ON_S3_RESUME)) {
-          TccStreamCfgBlob.BlobBase = (UINT64)(UINTN)TccStreamBase;
-          TccStreamCfgBlob.BlobLength = TccStreamSize;
-          TpmHashAndExtendPcrEventLog (0, (UINT8 *)TccStreamBase, TccStreamSize, EV_PLATFORM_CONFIG_FLAGS, sizeof(TccStreamCfgBlob), (UINT8 *)&TccStreamCfgBlob);
-        }
-
-       // Override Tcc settings from Streams
-          StreamConfig   = (TCC_STREAM_CONFIGURATION *) TccStreamBase;
-          PolicyConfig = (BIOS_SETTINGS *) &StreamConfig->BiosSettings;
-
-          if (StreamConfig->Version == TCC_STREAM_CONFIGURATION_VERSION) {
-            FspsUpd->FspsConfig.Eist                  = PolicyConfig->Pstates;
-            FspsUpd->FspsConfig.Hwp                   = PolicyConfig->HwpEn;
-            FspsUpd->FspsConfig.Cx                    = PolicyConfig->Cstates;
-            FspsUpd->FspsConfig.TurboMode             = PolicyConfig->Turbo;
-            FspsUpd->FspsConfig.PsfTccEnable          = PolicyConfig->FabricPm;
-            FspsUpd->FspsConfig.PchDmiAspmCtrl        = PolicyConfig->DmiAspm;
-            FspsUpd->FspsConfig.PchLegacyIoLowLatency = PolicyConfig->PchPwrClkGate;
-            DEBUG ((DEBUG_INFO, "Pstates\n HwpEn: %d\n EnableHwp: %d\n EnableCx: %d\n TurboMode:%d\n PsfTccEnable:%d\n PchDmiAspmCtrl:%d\n PchLegacyIoLowLatency:%d\n",PolicyConfig->Pstates, PolicyConfig->HwpEn, PolicyConfig->Cstates, PolicyConfig->Turbo, PolicyConfig->FabricPm, PolicyConfig->DmiAspm, PolicyConfig->PchPwrClkGate ));
-            for (Index = 0; Index < MaxPchPcieRootPorts; Index++) {
-              FspsUpd->FspsConfig.PcieRpAspm[Index]        = PolicyConfig->PchPcieAspm;
-              FspsUpd->FspsConfig.PcieRpL1Substates[Index] = PolicyConfig->PchPcieRpL1;
-            }
-            FspsUpd->FspsConfig.RenderStandby      = PolicyConfig->GtRstRc6;
-
-            for (Index = 0; Index < MaxCpuPciePorts; Index++) {
-               FspsUpd->FspsConfig.CpuPcieClockGating[Index]   = PolicyConfig->PcieClkGate;
-               FspsUpd->FspsConfig.CpuPcieRpAspm[Index]        = PolicyConfig->CpuPcieAspm;
-               FspsUpd->FspsConfig.CpuPcieRpL1Substates[Index] = PolicyConfig->CpuPcieRpL1;
-               DEBUG ((DEBUG_INFO, " PcieClkGate[%d]: %d\n PcieRootPortL1SubStates[%d]: %d\n PcieRootPortClockGating[%d]: %d\n", Index, PolicyConfig->PcieClkGate, Index, PolicyConfig->CpuPcieAspm, Index, PolicyConfig->CpuPcieRpL1));
-            }
-
-            PlatformData = (PLATFORM_DATA *)GetPlatformDataPtr ();
-            if(PlatformData != NULL){
-              PlatformData->PlatformFeatures.TccRtd3Support    = PolicyConfig->Dstates;
-              PlatformData->PlatformFeatures.TccLowPowerS0Idle = PolicyConfig->Sstates;
-              PlatformData->PlatformFeatures.TccDsoTuning      = TRUE;
-            }
-          }
-      }
-    }
-  }
-
-  // Load Tcc cache config binary from container
-  TccCacheConfigBase = NULL;
-  TccCacheConfigSize = 0;
-  Status = LoadComponent (SIGNATURE_32 ('I', 'P', 'F', 'W'), SIGNATURE_32 ('T', 'C', 'C', 'C'),
-                                (VOID **)&TccCacheConfigBase, &TccCacheConfigSize);
-  if (EFI_ERROR (Status)) {
-    DEBUG ((DEBUG_ERROR, "TCC  Cache config not found! %r\n", Status));
-  } else {
-    FspsUpd->FspsConfig.TccCacheCfgBase = (UINT32)(UINTN)TccCacheConfigBase;
-    FspsUpd->FspsConfig.TccCacheCfgSize = TccCacheConfigSize;
-    DEBUG ((DEBUG_INFO, "Load Tcc Cache @0x%p, size = 0x%x\n", TccCacheConfigBase, TccCacheConfigSize));
-
-    if (MEASURED_BOOT_ENABLED() && (GetBootMode() != BOOT_ON_S3_RESUME)) {
-      TccCacheCfgBlob.BlobBase = (UINT64)(UINTN)TccCacheConfigBase;
-      TccCacheCfgBlob.BlobLength = TccCacheConfigSize;
-      TpmHashAndExtendPcrEventLog (0, (UINT8 *)TccCacheConfigBase, TccCacheConfigSize, EV_PLATFORM_CONFIG_FLAGS, sizeof(TccCacheCfgBlob), (UINT8 *)&TccCacheCfgBlob);
-    }
-
-    FspsUpd->FspsConfig.L2QosEnumerationEn = 1;
-
-  }
-
-  // Load Tcc Crl binary from container
-  TccCrlBase = NULL;
-  TccCrlSize = 0;
-  Status = LoadComponent (SIGNATURE_32 ('I', 'P', 'F', 'W'), SIGNATURE_32 ('T', 'C', 'C', 'M'),
-                                (VOID **)&TccCrlBase, &TccCrlSize);
-  if (EFI_ERROR (Status)) {
-    DEBUG ((DEBUG_ERROR, "TCC Crl not found! %r\n", Status));
-  } else {
-    FspsUpd->FspsConfig.TccCrlBinBase = (UINT32)(UINTN)TccCrlBase;
-    FspsUpd->FspsConfig.TccCrlBinSize = TccCrlSize;
-    DEBUG ((DEBUG_INFO, "Load Tcc Crl @0x%p, size = 0x%x\n", TccCrlBase, TccCrlSize));
-    DumpHex (2, 0, MIN(0x40, TccCrlSize), TccCrlBase);
-
-    if (MEASURED_BOOT_ENABLED() && (GetBootMode() != BOOT_ON_S3_RESUME)) {
-      TccCrlBlob.BlobBase = (UINT64)(UINTN)TccCrlBase;
-      TccCrlBlob.BlobLength = TccCrlSize;
-      TpmHashAndExtendPcrEventLog (0, (UINT8 *)TccCrlBase, TccCrlSize, EV_EFI_PLATFORM_FIRMWARE_BLOB, sizeof(TccCrlBlob), (UINT8 *)&TccCrlBlob);
-    }
-  }
-
-  return Status;
-#else
-  FspsUpd->FspsConfig.SoftwareSramEn  = 0;
-  FspsUpd->FspsConfig.DsoTuningEn     = 0;
-  FspsUpd->FspsConfig.TccErrorLogEn   = 0;
-
   return EFI_SUCCESS;
-#endif
 }
 #endif
 
@@ -1098,23 +952,23 @@ UpdateFspConfig (
       FspsConfig->CpuPcieRpLtrMaxNoSnoopLatency[Index] = 0x100f;
     }
     FspsConfig->IopFusaConfigEnable = 0x0;
-    FspsConfig->SataPortDevSlpPinMux[0] = 0x59673e0c;
-    FspsConfig->SataPortDevSlpPinMux[1] = 0x5967400d;
+    FspsConfig->SataPortDevSlpPinMux[0] = GPIO_VER2_P_MUXING_SATA_DEVSLP0_GPP_H12;
+    FspsConfig->SataPortDevSlpPinMux[1] = GPIO_VER2_P_MUXING_SATA_DEVSLP1_GPP_H13;
     FspsConfig->SerialIoSpiDelayRxClk[1] = 0x0;
     FspsConfig->SerialIoSpiDelayRxClk[2] = 0x0;
     FspsConfig->SerialIoSpiDelayRxClk[3] = 0x0;
-    FspsConfig->PchSerialIoI2cSdaPinMux[0] = 0x1947c404;
-    FspsConfig->PchSerialIoI2cSdaPinMux[1] = 0x1947c606;
+    FspsConfig->PchSerialIoI2cSdaPinMux[0] = GPIO_VER2_P_MUXING_SERIALIO_I2C0_SDA_GPP_H4;
+    FspsConfig->PchSerialIoI2cSdaPinMux[1] = GPIO_VER2_P_MUXING_SERIALIO_I2C1_SDA_GPP_H6;
     FspsConfig->PchSerialIoI2cSdaPinMux[4] = 0;
-    FspsConfig->PchSerialIoI2cSdaPinMux[7] = 0x1947d20c;
-    FspsConfig->PchSerialIoI2cSclPinMux[0] = 0x1947a405;
-    FspsConfig->PchSerialIoI2cSclPinMux[1] = 0x1947a607;
+    FspsConfig->PchSerialIoI2cSdaPinMux[7] = GPIO_VER2_P_MUXING_SERIALIO_I2C7_SDA_GPP_H12;
+    FspsConfig->PchSerialIoI2cSclPinMux[0] = GPIO_VER2_P_MUXING_SERIALIO_I2C0_SCL_GPP_H5;
+    FspsConfig->PchSerialIoI2cSclPinMux[1] = GPIO_VER2_P_MUXING_SERIALIO_I2C1_SCL_GPP_H7;
     FspsConfig->PchSerialIoI2cSclPinMux[4] = 0;
-    FspsConfig->PchSerialIoI2cSclPinMux[7] = 0x1947b20d;
-    FspsConfig->IshGpGpioPinMuxing[4] = 0x4900a803;
-    FspsConfig->IshGpGpioPinMuxing[5] = 0x4900aa04;
-    FspsConfig->IshGpGpioPinMuxing[6] = 0x4907ac0c;
-    FspsConfig->IshGpGpioPinMuxing[7] = 0x5900ae0f;
+    FspsConfig->PchSerialIoI2cSclPinMux[7] = GPIO_VER2_P_MUXING_SERIALIO_I2C7_SCL_GPP_H13;
+    FspsConfig->IshGpGpioPinMuxing[4] = GPIO_VER2_P_MUXING_ISH_GP_4_B3;
+    FspsConfig->IshGpGpioPinMuxing[5] = GPIO_VER2_P_MUXING_ISH_GP_5_B4;
+    FspsConfig->IshGpGpioPinMuxing[6] = GPIO_VER2_P_MUXING_ISH_GP_6_H12;
+    FspsConfig->IshGpGpioPinMuxing[7] = GPIO_VER2_P_MUXING_ISH_GP_7_B15;
     FspsConfig->PchFivrExtV1p05RailSupportedVoltageStates = 0x2;
     FspsConfig->PchFivrExtV1p05RailVoltage = 0x0;
     FspsConfig->PchFivrExtVnnRailVoltage = 0x0;
@@ -1124,8 +978,8 @@ UpdateFspConfig (
     FspsConfig->PchFivrVccinAuxRetToLowCurModeVolTranTime = 0x2b;
     FspsConfig->PchFivrVccinAuxOffToHighCurModeVolTranTime = 0x96;
     FspsConfig->PchFivrExtVnnRailSxIccMaximum = 0x0;
-    FspsConfig->CnviRfResetPinMux = 0x194ce404;
-    FspsConfig->CnviClkreqPinMux = 0x294ce605;
+    FspsConfig->CnviRfResetPinMux = GPIO_VER2_LP_MUXING_CNVI_RF_RESET_GPP_F4;
+    FspsConfig->CnviClkreqPinMux = GPIO_VER2_LP_MUXING_CNVI_MODEM_CLKREQ_GPP_F5;
     FspsConfig->PmcUsb2PhySusPgEnable = 0x1;
     FspsConfig->PmcModPhySusPgEnable = 0x1;
     FspsConfig->IomTypeCPortPadCfg[2] = 0x0;
